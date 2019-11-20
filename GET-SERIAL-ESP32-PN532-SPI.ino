@@ -1,8 +1,16 @@
+#include<iostream>
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_PN532.h>
 #include <Time.h>
 #include <TimeLib.h>
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+using namespace std;
 
 // If using the breakout with SPI, define the pins for SPI communication.
 #define PN532_SCK  (18)
@@ -13,8 +21,28 @@
 // Use this line for a breakout with a SPI connection:
 Adafruit_PN532 nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
 
+const char* ssid = "Noureen Cell";
+const char* password = "lepengdados";
+
+// Add your MQTT Broker IP address, example:
+//const char* mqtt_server = "192.168.1.144";
+const char* mqtt_server = "192.168.8.102";
+const char* ntp_server = "asia.pool.ntp.org";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+long lastMsg = 0;
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, ntp_server);
+
 void setup(void) {
   Serial.begin(115200);
+
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+
   Serial.println("Hello!");
   nfc.begin();
   uint32_t versiondata = nfc.getFirmwareVersion();
@@ -33,8 +61,73 @@ void setup(void) {
   Serial.println("Waiting for an ISO14443A Card ...");
 }
 
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Initialize a NTPClient to get time
+  timeClient.begin();
+  // Set offset time in seconds to adjust for your timezone, for example:
+  // GMT +1 = 3600
+  // GMT +8 = 28800
+  // GMT -1 = -3600
+  // GMT 0 = 0
+  //timeClient.setTimeOffset(7 * 3600);
+  timeClient.setUpdateInterval(5 * 60 * 1000); //ms
+}
+
+void callback(char* topic, byte* message, unsigned int length) {
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+      // Subscribe
+      client.subscribe("test_topic");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
 
 void loop(void) {
+  while (!timeClient.update()) {
+    timeClient.forceUpdate();
+  }
   uint8_t success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
   uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
@@ -94,20 +187,41 @@ void loop(void) {
         for (int i = 4; i < 7; i++) {
           uint8_t data[16];
           success = nfc.mifareclassic_ReadDataBlock(i, data);
-          //          nfc.PrintHexChar(data, 16);
 
           for (int j = 0; j < 16; j++) {
             temp[index++] = data[j];
-            //            index++;
           }
         }
 
         if (success)
         {
+          unsigned long unixTime = timeClient.getEpochTime();
+          Serial.println(unixTime);
+          String hexDate =  String(unixTime, HEX);
+          hexDate.toUpperCase();
+          Serial.println(hexDate);
+          char arrDate[hexDate.length() + 1];
+          hexDate.toCharArray(arrDate, hexDate.length() + 1);
+          uint8_t tglByte[4];
+          uint8_t tglByteTemp[4] = {};
+          hex2ByteArray(arrDate, 4, tglByte);
+          copy(begin(tglByte), end(tglByte), tglByteTemp);
+          nfc.PrintHexChar(tglByte, 4);
+          nfc.PrintHexChar(tglByteTemp, 4);
           // Data seems to have been read ... spit it out
           Serial.println("Reading Block 4:");
           nfc.PrintHexChar(temp, 48);
+
+
+          uint8_t tempWrite[48] = {};
+          uint8_t tempWrite16[16] = {};
+          copy(begin(temp), end(temp), tempWrite);
+          copy_n(begin(tglByte), 4, begin(tempWrite) + 10);
+          copy_n(begin(tempWrite), 16, begin(tempWrite16));
+          nfc.PrintHexChar(tempWrite, 48);
+          nfc.PrintHexChar(tempWrite16, 16);
           Serial.println("");
+
 
           uint8_t nopol[10];
           uint8_t tanggal[4];
@@ -121,12 +235,10 @@ void loop(void) {
           index = 0;
           for (int i = 0; i < 10; i++) {
             nopol[i] = temp[index++];
-            //            index++;
           }
           //copy tanggal
           for (int i = 0; i < 4; i++) {
             tanggal[i] = temp[index++];
-            //            index++;
           }
           stMasuk = temp[index++];
           kodeGate = temp[index++];
@@ -142,7 +254,8 @@ void loop(void) {
 
           Serial.print("Nopol: ");
           nfc.PrintHexChar(nopol, 10);
-          Serial.println();
+          String noKend = hex2Ascii(nopol, 10);
+          Serial.println(noKend);
           Serial.print("Tanggal: " );
           nfc.PrintHexChar(tanggal, 4);
           Serial.println();
@@ -161,15 +274,35 @@ void loop(void) {
           Serial.print("Tanggal long: " );
           char str[8] = "";
           array_to_string(tanggal, 4, str);
-          Serial.println(str);
+          String tglTrx = String(str);
+          Serial.println(tglTrx);
+
+          time_t now;
+
+          time(&now);
+          Serial.println(now);
+
+
           uint64_t result = getUInt64fromHex(str);
+          unsigned long longTanggal = result;
+          Serial.println(String(longTanggal));
           unsigned int add7Hour = 7 * 3600;
           result += add7Hour;
 
           char buff[32];
           sprintf(buff, "%02d.%02d.%02d %02d:%02d:%02d", day(result), month(result), year(result), hour(result), minute(result), second(result));
-
           Serial.println(buff);
+
+          char strExpired[8] = "";
+          array_to_string(expired, 4, strExpired);
+          String tglExpired = String(strExpired);
+          Serial.println(tglExpired);
+          uint64_t resultExpired = getUInt64fromHex(strExpired);
+
+          resultExpired += add7Hour;
+
+          char buffExpired[32];
+          sprintf(buffExpired, "%02d.%02d.%02d %02d:%02d:%02d", day(result), month(result), year(result), hour(result), minute(result), second(result));
 
           printf(" bignum = %lld\n", result);
           String tgl = uint64ToString(result);
@@ -179,21 +312,67 @@ void loop(void) {
           strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", localtime(&ti));
           Serial.println(timeStringBuff);
 
-          unsigned long offset_days = 7;    // 7 hours
-          unsigned long t_unix_date1, t_unix_date2;
-          t_unix_date1 = result;
-          Serial.print("t_unix_date1: ");
-          Serial.println(t_unix_date1);
-          //          offset_days = offset_days * 86400;    // convert number of days to seconds
-          offset_days = 7 * 3600;
-          t_unix_date2 = result + offset_days;
-          Serial.print("t_unix_date2: ");
-          Serial.println(t_unix_date2);
-          printf("Date1: %4d-%02d-%02d %02d:%02d:%02d\n", year(t_unix_date1), month(t_unix_date1), day(t_unix_date1), hour(t_unix_date1), minute(t_unix_date1), second(t_unix_date1));
-          printf("Date2: %4d-%02d-%02d %02d:%02d:%02d\n", year(t_unix_date2), month(t_unix_date2), day(t_unix_date2), hour(t_unix_date2), minute(t_unix_date2), second(t_unix_date2));
+          //          unsigned long offset_days = 7;    // 7 hours
+          //          unsigned long t_unix_date1, t_unix_date2;
+          //          t_unix_date1 = result;
+          //          Serial.print("t_unix_date1: ");
+          //          Serial.println(t_unix_date1);
+          //          //          offset_days = offset_days * 86400;    // convert number of days to seconds
+          //          offset_days = 7 * 3600;
+          //          t_unix_date2 = result + offset_days;
+          //          Serial.print("t_unix_date2: ");
+          //          Serial.println(t_unix_date2);
+          //          printf("Date1: %4d-%02d-%02d %02d:%02d:%02d\n", year(t_unix_date1), month(t_unix_date1), day(t_unix_date1), hour(t_unix_date1), minute(t_unix_date1), second(t_unix_date1));
+          //          printf("Date2: %4d-%02d-%02d %02d:%02d:%02d\n", year(t_unix_date2), month(t_unix_date2), day(t_unix_date2), hour(t_unix_date2), minute(t_unix_date2), second(t_unix_date2));
 
-          // Wait a bit before reading the card again
-          delay(1000);
+          if (!client.connected()) {
+            reconnect();
+          }
+          client.loop();
+
+          char strUid[8] = "";
+          array_to_string(uid, 4, strUid);
+
+          String stringSend = "";
+          String cardUid = String(strUid);
+          stringSend += cardUid;
+          stringSend += ";";
+
+          stringSend += noKend;
+          stringSend += ";";
+          stringSend += hexDate;
+          stringSend += ";";
+
+          String cardNip = hex2Ascii(nip, 18);
+          stringSend += cardNip;
+          stringSend += ";";
+
+          stringSend += tglExpired;
+          stringSend += ";";
+
+          String cardStMasuk = String(stMasuk);
+          stringSend += cardStMasuk;
+          stringSend += ";";
+
+          String cardStKartu = String(stKartu);
+          stringSend += cardStKartu;
+          stringSend += ";";
+
+          String cardKodeGate = String(kodeGate);
+          stringSend += cardKodeGate;
+
+          success = nfc.mifareclassic_WriteDataBlock (4, tempWrite16);
+          if (success) {
+            Serial.println(stringSend);
+            char publish[stringSend.length() + 1];
+            stringSend.toCharArray(publish, stringSend.length() + 1);
+            client.publish("parkir/card", publish);
+
+            // Wait a bit before reading the card again
+            delay(1000);
+          } else {
+            Serial.println("Write block 4 gagal...");
+          }
         }
         else
         {
@@ -257,6 +436,90 @@ uint64_t getUInt64fromHex(char const *str)
   return accumulator;
 }
 
-void long2Hex[](unsigned long val, char buffer[15]) {
-  ltoa(val, buffer, 16);
+String hex2Ascii(uint8_t data[], uint8_t len)
+{
+  char dt[len] = "";
+  byte index = 0;
+  for (uint8_t i = 0; i < len; i++) {
+    char c = data[i] & 0xFF;
+    if (c <= 0x1f || c > 0x7f) {
+      dt[i] = '.';
+    } else {
+      dt[i] = c;
+    }
+    index++;
+    dt[index] = '\0';
+  }
+  return String(dt);
+}
+
+void hex2ByteArray(char data[], uint8_t len, uint8_t result[]) {
+  char temp[3];
+  for (int i = 0; i < len; i++) {
+    uint8_t extract;
+    char a = data[2 * i];
+    char b = data[2 * i + 1];
+    extract = convertCharToHex(a) << 4 | convertCharToHex(b);
+    result[i] = extract;
+  }
+}
+
+char convertCharToHex(char ch)
+{
+  char returnType;
+  switch (ch)
+  {
+    case '0':
+      returnType = 0;
+      break;
+    case  '1' :
+      returnType = 1;
+      break;
+    case  '2':
+      returnType = 2;
+      break;
+    case  '3':
+      returnType = 3;
+      break;
+    case  '4' :
+      returnType = 4;
+      break;
+    case  '5':
+      returnType = 5;
+      break;
+    case  '6':
+      returnType = 6;
+      break;
+    case  '7':
+      returnType = 7;
+      break;
+    case  '8':
+      returnType = 8;
+      break;
+    case  '9':
+      returnType = 9;
+      break;
+    case  'A':
+      returnType = 10;
+      break;
+    case  'B':
+      returnType = 11;
+      break;
+    case  'C':
+      returnType = 12;
+      break;
+    case  'D':
+      returnType = 13;
+      break;
+    case  'E':
+      returnType = 14;
+      break;
+    case  'F' :
+      returnType = 15;
+      break;
+    default:
+      returnType = 0;
+      break;
+  }
+  return returnType;
 }
